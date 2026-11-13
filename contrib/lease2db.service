@@ -1,0 +1,22 @@
+# An example unit. Put the connection string in /etc/lease2db.env as
+#   LEASE2DB_DSN=host=db.example.net dbname=dhcp user=lease2db sslmode=verify-full ...
+# readable by the service's user only.
+[Unit]
+Description=lease2db - dhcpd leases into PostgreSQL
+Documentation=https://github.com/dhtech/lease2db
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/lease2db.env
+ExecStart=/usr/local/bin/lease2db -leases /var/lib/dhcp/dhcpd.leases -scopes /etc/dhcp/dhcpd.conf
+Restart=always
+RestartSec=5
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
