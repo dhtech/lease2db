@@ -97,7 +97,9 @@ func TestParseWhatDhcpdWrites(t *testing.T) {
 	if a.Hostname != `tech-laptop "7"` {
 		t.Errorf("hostname %q", a.Hostname)
 	}
-	if a.CircuitID != "ge-0/0/12.0:office" || a.RemoteID != "0:6:0:1e:be:ef:0:1" {
+	// option 82 is bytes: the quoted spelling as its text, the hex
+	// spelling decoded
+	if a.CircuitID != "ge-0/0/12.0:office" || a.RemoteID != "\x00\x06\x00\x1e\xbe\xef\x00\x01" {
 		t.Errorf("option 82: %q / %q", a.CircuitID, a.RemoteID)
 	}
 	if a.VendorClass != "MSFT 5.0" {
@@ -214,5 +216,23 @@ func TestFollowAGrowingAndARewrittenFile(t *testing.T) {
 	write("# header\n"+block("10.0.0.4"), false)
 	if ips, restarted := poll(f); strings.Join(ips, ",") != "10.0.0.4" || !restarted {
 		t.Fatalf("truncated: %v restarted=%v", ips, restarted)
+	}
+}
+
+func TestOptionBytesInBothSpellings(t *testing.T) {
+	for in, want := range map[string]string{
+		`"ge-0/0/7.0:guests"`: "ge-0/0/7.0:guests",
+		`0:4:0:64:1:c`:        "\x00\x04\x00\x64\x01\x0c",
+		`"aa:bb:cc:dd:ee:ff"`: "aa:bb:cc:dd:ee:ff", // text that looks like hex stays text
+		`aa:bb:cc:dd:ee:ff`:   "\xaa\xbb\xcc\xdd\xee\xff",
+		`"sw\"1\\\001"`:       "sw\"1\\\x01",
+		`7f`:                  "\x7f",
+		`not hex at all`:      "not hex at all",
+		`1:2:zz`:              "1:2:zz",
+		`123:4`:               "123:4",
+	} {
+		if got := optionBytes(in); got != want {
+			t.Errorf("optionBytes(%s) = %q, want %q", in, got, want)
+		}
 	}
 }

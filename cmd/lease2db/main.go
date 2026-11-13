@@ -40,6 +40,8 @@ type counters struct {
 	lastSuccess                                time.Time
 	connected                                  bool
 	tracked                                    int
+	// usage is the leases-per-network part of the metrics, ready made
+	usage string
 }
 
 func main() {
@@ -114,6 +116,7 @@ func run(ctx context.Context, o options, c *counters) error {
 	c.connected = true
 	log.Printf("database ready: schema version %d, %d addresses known", schema, len(current))
 
+	var scopeList []scopes.Scope
 	var scopesSeen time.Time
 	var lastMetrics time.Time
 	ticker := time.NewTicker(o.interval)
@@ -123,11 +126,12 @@ func run(ctx context.Context, o options, c *counters) error {
 			if info, err := os.Stat(o.scopes); err != nil {
 				log.Printf("scopes: %v", err)
 			} else if !info.ModTime().Equal(scopesSeen) {
-				n, err := loadScopes(ctx, db, o.scopes)
+				list, err := loadScopes(ctx, db, o.scopes)
 				var unreadable *fileError
 				switch {
 				case err == nil:
-					log.Printf("scopes: %d networks from %s", n, o.scopes)
+					scopeList = list
+					log.Printf("scopes: %d networks from %s", len(list), o.scopes)
 				case errors.As(err, &unreadable):
 					// a file dhcpd would not take either: keep what we have
 					log.Printf("scopes: %v", err)
@@ -185,6 +189,7 @@ func run(ctx context.Context, o options, c *counters) error {
 		}
 		c.tracked = tracker.Len()
 		if time.Since(lastMetrics) >= 15*time.Second {
+			c.usage = usageMetrics(tracker, scopeList, time.Now())
 			writeMetrics(o.metrics, c)
 			lastMetrics = time.Now()
 		}
@@ -203,24 +208,24 @@ type fileError struct{ err error }
 
 func (e *fileError) Error() string { return e.err.Error() }
 
-func loadScopes(ctx context.Context, db *store.Store, path string) (int, error) {
+func loadScopes(ctx context.Context, db *store.Store, path string) ([]scopes.Scope, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, &fileError{err}
+		return nil, &fileError{err}
 	}
 	defer f.Close()
 	list, err := scopes.Parse(f)
 	if err != nil {
-		return 0, &fileError{err}
+		return nil, &fileError{err}
 	}
 	if err := db.Begin(ctx); err != nil {
-		return 0, err
+		return nil, err
 	}
 	if err := db.ReplaceScopes(list); err != nil {
 		db.Rollback()
-		return 0, err
+		return nil, err
 	}
-	return len(list), db.Commit()
+	return list, db.Commit()
 }
 
 // writeMetrics replaces the metrics file in one move, so that the
@@ -262,6 +267,11 @@ lease2db_file_restarts_total %d
 # TYPE lease2db_addresses gauge
 lease2db_addresses %d
 `, connected, last, c.blocks, c.changes, c.refused, c.errors, c.restarts, c.tracked)
+	// while there is no connection the lease counts are not known:
+	// better absent than a number from before
+	if c.connected {
+		text += c.usage
+	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".lease2db.")
 	if err != nil {
 		return

@@ -35,7 +35,8 @@ func open(t *testing.T) (*Store, *sql.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { raw.Close() })
-	if _, err := raw.ExecContext(ctx, `DROP VIEW IF EXISTS scopes_usage, leases_active;
+	if _, err := raw.ExecContext(ctx, `DROP VIEW IF EXISTS leases_totals, scopes_usage, leases_active, leases_history;
+		DROP FUNCTION IF EXISTS lease2db_show(bytea);
 		DROP TABLE IF EXISTS leases, scopes, lease2db_schema`); err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +133,9 @@ func TestTheHistoryInTheDatabase(t *testing.T) {
 		block("192.0.2.12", bob, "active", -4, 56),
 		block("192.0.2.10", bob, "active", -2, 58), // takes alice's address
 	}
+	// relay information that is not text: bytes, shown as hex
+	journal[4].CircuitID = "\x00\x04\x00\x64\x01\x0c"
+	journal[4].RemoteID = "aa:bb:cc:dd:ee:ff" // text that looks like hex stays text
 	if n := batch(t, s, tr, journal...); n != 6 {
 		t.Fatalf("%d changes, want 6", n)
 	}
@@ -145,8 +149,8 @@ func TestTheHistoryInTheDatabase(t *testing.T) {
 	// alice's holding ended where bob's began, and kept its details
 	var ends time.Time
 	var host, circuit string
-	if err := db.QueryRow(`SELECT ends, hostname, circuit_id FROM leases
-		WHERE ip = '192.0.2.10' AND mac = $1`, alice).Scan(&ends, &host, &circuit); err != nil {
+	if err := db.QueryRow(`SELECT ends, hostname, circuit_id_text FROM leases_history
+		WHERE ip = '192.0.2.10' AND mac = $1 AND NOT active`, alice).Scan(&ends, &host, &circuit); err != nil {
 		t.Fatal(err)
 	}
 	if !ends.Equal(t0.Add(-2*time.Minute)) || host != "laptop" || circuit != "port-7" {
@@ -161,6 +165,26 @@ func TestTheHistoryInTheDatabase(t *testing.T) {
 	}
 	if n := count(t, db, `SELECT leases FROM scopes_usage WHERE network = '198.51.100.0/24'`); n != 0 {
 		t.Errorf("scopes_usage says %d leases in the empty network", n)
+	}
+	var percent float64
+	var gateway string
+	if err := db.QueryRow(`SELECT percent_used, host(gateway) FROM scopes_usage WHERE name = 'OFFICE'`).Scan(&percent, &gateway); err != nil || percent != 1.0 || gateway != "192.0.2.1" {
+		t.Errorf("scopes_usage of OFFICE: %v percent, gateway %q, %v", percent, gateway, err)
+	}
+	// where a client is plugged in: bytes in the table, readable in the view
+	var shown, remote string
+	var rawCircuit []byte
+	if err := db.QueryRow(`SELECT circuit_id, circuit_id_text, remote_id_text FROM leases_active
+		WHERE ip = '192.0.2.12'`).Scan(&rawCircuit, &shown, &remote); err != nil {
+		t.Fatal(err)
+	}
+	if string(rawCircuit) != "\x00\x04\x00\x64\x01\x0c" || shown != "00:04:00:64:01:0c" || remote != "aa:bb:cc:dd:ee:ff" {
+		t.Errorf("relay information: raw %x, shown %q, remote %q", rawCircuit, shown, remote)
+	}
+	var activeLeases, activeClients, clientsEver int
+	if err := db.QueryRow(`SELECT active_leases, active_clients, clients_ever FROM leases_totals`).Scan(
+		&activeLeases, &activeClients, &clientsEver); err != nil || activeLeases != 2 || activeClients != 1 || clientsEver != 2 {
+		t.Errorf("totals: %d leases, %d clients now, %d ever, %v", activeLeases, activeClients, clientsEver, err)
 	}
 
 	// a restart: what Current returns is where the tracker goes on, and

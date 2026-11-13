@@ -30,8 +30,9 @@ type Row struct {
 	FirstSeen, Starts, Ends time.Time
 	State                   string
 	Hostname                string
-	CircuitID, RemoteID     string
-	VendorClass             string
+	// relay agent option 82, as bytes (see leases.Lease)
+	CircuitID, RemoteID string
+	VendorClass         string
 }
 
 // Store is where the rows are kept.
@@ -63,6 +64,15 @@ func New(store Store, current []Row) *Tracker {
 
 // Len is the number of addresses with a known row.
 func (t *Tracker) Len() int { return len(t.cur) }
+
+// Active calls fn for every address that is leased at the given time.
+func (t *Tracker) Active(now time.Time, fn func(ip netip.Addr, mac string)) {
+	for ip, row := range t.cur {
+		if row.State == "active" && (row.Ends.IsZero() || row.Ends.After(now)) {
+			fn(ip, row.MAC)
+		}
+	}
+}
 
 // Apply takes one block of the lease file. It reports whether the block
 // changed anything in the store.

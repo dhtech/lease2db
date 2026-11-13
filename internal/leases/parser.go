@@ -28,9 +28,14 @@ type Lease struct {
 	State string // active, free, expired, released, abandoned, backup, ...
 	// MAC is nil when the block names no hardware address (abandoned
 	// leases, some free ones).
-	MAC         net.HardwareAddr
-	Hostname    string
-	CircuitID   string // option 82, as dhcpd wrote it
+	MAC      net.HardwareAddr
+	Hostname string
+	// CircuitID and RemoteID are the relay agent's option 82, as the
+	// BYTES the relay sent (a Go string used as a byte string). dhcpd
+	// writes them as quoted text when every byte is printable and as
+	// colon-separated hex otherwise; both forms come out as the same
+	// bytes here, so nothing depends on how dhcpd chose to print them.
+	CircuitID   string
 	RemoteID    string
 	VendorClass string
 }
@@ -153,9 +158,9 @@ func statement(l *Lease, text string) error {
 		opt, value, _ := strings.Cut(rest, " ")
 		switch opt {
 		case "agent.circuit-id":
-			l.CircuitID = unquote(strings.TrimSpace(value))
+			l.CircuitID = optionBytes(strings.TrimSpace(value))
 		case "agent.remote-id":
-			l.RemoteID = unquote(strings.TrimSpace(value))
+			l.RemoteID = optionBytes(strings.TrimSpace(value))
 		}
 	case "set":
 		// set vendor-class-identifier = "MSFT 5.0"
@@ -198,12 +203,22 @@ func parseTime(s string) (time.Time, error) {
 }
 
 // unquote turns dhcpd's quoted string - with \" \\ and \ooo octal escapes -
-// into its text; a value that is not quoted (colon-separated hex) is kept
-// as it stands. Bytes that are not valid UTF-8 are dropped: the result goes
-// into a text column.
+// into its text; a value that is not quoted is kept as it stands. Bytes
+// that are not valid UTF-8 are dropped: the result goes into a text
+// column.
 func unquote(s string) string {
-	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+	raw, quoted := unquoteBytes(s)
+	if !quoted {
 		return s
+	}
+	return strings.ToValidUTF8(strings.ReplaceAll(raw, "\x00", ""), "")
+}
+
+// unquoteBytes returns the bytes of a quoted string and true, or s
+// itself and false when s is not quoted.
+func unquoteBytes(s string) (string, bool) {
+	if len(s) < 2 || s[0] != '"' || s[len(s)-1] != '"' {
+		return s, false
 	}
 	s = s[1 : len(s)-1]
 	var b strings.Builder
@@ -222,7 +237,29 @@ func unquote(s string) string {
 		i++
 		b.WriteByte(s[i])
 	}
-	return strings.ToValidUTF8(strings.ReplaceAll(b.String(), "\x00", ""), "")
+	return b.String(), true
+}
+
+// optionBytes returns the bytes of an option value in either of dhcpd's
+// two spellings: "quoted text", or colon-separated hex (0:4:0:64:1:c).
+// Anything else is kept as its own bytes.
+func optionBytes(s string) string {
+	if raw, quoted := unquoteBytes(s); quoted {
+		return raw
+	}
+	parts := strings.Split(s, ":")
+	out := make([]byte, 0, len(parts))
+	for _, part := range parts {
+		if len(part) < 1 || len(part) > 2 {
+			return s
+		}
+		v, err := strconv.ParseUint(part, 16, 8)
+		if err != nil {
+			return s
+		}
+		out = append(out, byte(v))
+	}
+	return string(out)
 }
 
 func isOctal(c byte) bool { return c >= '0' && c <= '7' }

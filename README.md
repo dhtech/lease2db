@@ -141,47 +141,98 @@ per-network views stay empty.
 | `state` | dhcpd's binding state: `active`, `free`, `expired`, `released`, `abandoned`, ... |
 | `current` | true for the latest row of its address |
 | `hostname` | the name the client sent |
-| `circuit_id`, `remote_id` | relay agent information (option 82): where the client is plugged in |
+| `circuit_id`, `remote_id` | relay agent information (option 82): where the client is plugged in. `bytea` - the bytes the relay sent |
 | `vendor_class` | the client's vendor class, when dhcpd is set up to record it |
 | `updated` | when the row last changed |
 
 **`scopes`** - the networks: `network`, `name`, `vlan`, `gateway`,
 `addresses` (in the dynamic ranges), `active` (in the configuration now).
 
-**`leases_active`** (view) - who holds which address right now, with the
-network's name and VLAN.
+Applications should read the views rather than the tables:
 
-**`scopes_usage`** (view) - for every active network, its number of
-addresses and how many are leased right now.
+| View | |
+|---|---|
+| `leases_history` | every row of `leases` with its network (`network`, `scope`, `vlan`), a boolean `active` (leased right now), and the relay information made readable: `circuit_id_text`, `remote_id_text` |
+| `leases_active` | the rows of `leases_history` that are leased right now |
+| `scopes_usage` | for every active network: `name`, `vlan`, `gateway`, `addresses`, `leases` (leased right now) and `percent_used` |
+| `leases_totals` | one row: `active_leases`, `active_clients` (distinct MAC addresses), `clients_ever` |
+
+### Relay agent information (option 82)
+
+`circuit_id` and `remote_id` tell which switch and port a client sits
+behind, in whatever format the relay's vendor chose - text on some
+(`ge-0/0/7.0:guests`), packed bytes on others. dhcpd writes them into
+its lease file as quoted text when every byte happens to be printable
+and as hex otherwise; `lease2db` stores the **bytes themselves**, so
+text that merely looks like hex is never mistaken for it.
+
+`circuit_id_text` and `remote_id_text` (the function
+`lease2db_show(bytea)`) give them for reading: as text when all bytes
+are printable ASCII, else as hex (`00:04:00:64:01:0c`). Decoding a
+vendor's packed format - VLAN, module and port on Cisco, for example -
+is left to the application:
+
+```sql
+SELECT get_byte(circuit_id, 2) * 256 + get_byte(circuit_id, 3) AS vlan,
+       get_byte(circuit_id, 4) AS module, get_byte(circuit_id, 5) AS port
+FROM leases_active WHERE ip = '192.0.2.57' AND length(circuit_id) = 6;
+```
 
 ### Questions to ask it
+
+Where is this address plugged in, right now?
+
+```sql
+SELECT mac, hostname, remote_id_text AS switch, circuit_id_text AS port, scope, vlan
+FROM leases_active WHERE ip = '192.0.2.57';
+```
 
 Who had this address at that time?
 
 ```sql
-SELECT mac, hostname, circuit_id, first_seen, ends
-FROM leases
+SELECT mac, hostname, circuit_id_text, first_seen, ends
+FROM leases_history
 WHERE ip = '192.0.2.57'
   AND first_seen <= '2026-01-13 21:40+01'
   AND (ends IS NULL OR ends >= '2026-01-13 21:40+01');
 ```
 
-Where has this client been?
+Where has this client been? (Search by `hostname` works the same way.)
 
 ```sql
-SELECT ip, first_seen, ends, state, circuit_id
-FROM leases WHERE mac = '00:00:5e:00:53:01' ORDER BY first_seen;
+SELECT ip, scope, first_seen, ends, state, circuit_id_text
+FROM leases_history WHERE mac = '00:00:5e:00:53:01' ORDER BY first_seen;
 ```
 
 How full is every network?
 
 ```sql
-SELECT name, vlan, leases, addresses,
-       round(100.0 * leases / nullif(addresses, 0)) AS percent
-FROM scopes_usage ORDER BY percent DESC NULLS LAST;
+SELECT name, vlan, network, gateway, leases, addresses, percent_used
+FROM scopes_usage ORDER BY percent_used DESC NULLS LAST;
+```
+
+Who is in this network right now?
+
+```sql
+SELECT ip, mac, hostname, ends FROM leases_active WHERE vlan = 10 ORDER BY ip;
+```
+
+How many leases and clients are there?
+
+```sql
+SELECT * FROM leases_totals;
 ```
 
 The views work directly as data sources for Grafana's PostgreSQL plugin.
+Give an application that only reads a role of its own:
+
+```sql
+CREATE ROLE dhcp_read LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE dhcp TO dhcp_read;
+GRANT USAGE ON SCHEMA public TO dhcp_read;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO dhcp_read;
+ALTER DEFAULT PRIVILEGES FOR ROLE lease2db IN SCHEMA public GRANT SELECT ON TABLES TO dhcp_read;
+```
 
 ### Good to know
 
@@ -190,7 +241,7 @@ The views work directly as data sources for Grafana's PostgreSQL plugin.
   only in the history if dhcpd had not yet rewritten its file - dhcpd
   keeps the last word about every address, not everything in between.
 - Addresses given by `fixed-address` are not in the lease file at all, so
-  they are not in the history either.
+  they are not in the history either - and have no relay information.
 - Old rows are never deleted. Delete what you no longer want yourself,
   for example `DELETE FROM leases WHERE NOT current AND ends < now() - interval '1 year'`.
 - DHCPv6 (`dhcpd6.leases`) is not read.
@@ -211,8 +262,14 @@ every 15 seconds:
 | `lease2db_errors_total` | times the database connection was lost |
 | `lease2db_file_restarts_total` | times the file was read from the top |
 | `lease2db_addresses` | addresses with a row in the history |
+| `lease2db_leases_active` | addresses leased right now |
+| `lease2db_clients_active` | clients (MAC addresses) holding a lease right now |
+| `lease2db_scope_addresses{network,name,vlan}` | addresses in the network's dynamic ranges (with `-scopes`) |
+| `lease2db_scope_leases_active{network,name,vlan}` | addresses of the network leased right now (with `-scopes`) |
 
 A sensible alert: `time() - lease2db_last_success_timestamp_seconds > 300`.
+And a graph of how full the networks are, over time, without asking the
+database: `lease2db_scope_leases_active / lease2db_scope_addresses`.
 
 ## Development
 
