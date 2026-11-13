@@ -26,9 +26,12 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      # the latest stable Go release, whatever it is on the day
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
+          check-latest: true
+      - run: go version
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...

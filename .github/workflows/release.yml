@@ -15,9 +15,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # the latest stable Go release, whatever it is on the day
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: stable
+          check-latest: true
+      - run: go version
       - run: go vet ./...
       - run: go test ./...
       - name: build

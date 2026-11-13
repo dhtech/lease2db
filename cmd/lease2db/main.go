@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -53,7 +54,7 @@ func main() {
 		"write Prometheus metrics to this file (node exporter textfile collector; optional)")
 	flag.Parse()
 	if *showVersion {
-		fmt.Println("lease2db", version)
+		fmt.Printf("lease2db %s (%s)\n", version, runtime.Version())
 		return
 	}
 	log.SetFlags(0) // the journal has the time

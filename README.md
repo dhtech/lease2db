@@ -46,7 +46,8 @@ install -m 755 lease2db_<version>_linux_amd64/lease2db /usr/local/bin/
 lease2db -version
 ```
 
-Or build it yourself (Go 1.25 or newer):
+The released binaries are built with the latest stable Go. Or build it
+yourself (Go 1.25 or newer):
 
 ```sh
 go build ./cmd/lease2db
